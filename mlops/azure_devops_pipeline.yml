@@ -1,0 +1,83 @@
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+  paths:
+    include:
+      - pipelines/*
+      - src/*
+      - mlops/*
+      - infrastructure/*
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  - name: azureServiceConnection
+    value: 'sc-azure-platform'
+  - name: resourceGroupName
+    value: 'rg-prod-data'
+  - name: amlWorkspaceName
+    value: 'aml-prod-ws'
+
+stages:
+  - stage: Build_And_Lint
+    displayName: 'CI - Build and Lint'
+    jobs:
+      - job: Lint_Test
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.9'
+          
+          - script: |
+              python -m pip install --upgrade pip
+              pip install ruff pytest
+              pip install -r requirements.txt
+            displayName: 'Install Dependencies'
+
+          - script: |
+              ruff check .
+            displayName: 'Linting (Ruff)'
+
+          - script: |
+              pytest tests/
+            displayName: 'Execute Data Quality Tests'
+
+  - stage: Deploy_Infrastructure
+    displayName: 'CD - Provision Resources'
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: Provision
+        steps:
+          - task: AzureResourceManagerTemplateDeployment@3
+            inputs:
+              deploymentScope: 'Resource Group'
+              azureResourceManagerConnection: $(azureServiceConnection)
+              subscriptionId: 'YOUR_SUBSCRIPTION_ID'
+              action: 'Create Or Update Resource Group'
+              resourceGroupName: $(resourceGroupName)
+              location: 'East US'
+              templateLocation: 'Linked artifact'
+              csmFile: 'infrastructure/bicep/main.bicep'
+              deploymentMode: 'Incremental'
+            displayName: 'Deploy Bicep Template'
+
+  - stage: Deploy_ML_Model
+    displayName: 'CD - ML Model Orchestration'
+    dependsOn: Deploy_Infrastructure
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+    jobs:
+      - job: Train_And_Register
+        steps:
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: $(azureServiceConnection)
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                python src/models/train_orchestrator.py \
+                  --workspace_name $(amlWorkspaceName) \
+                  --resource_group $(resourceGroupName)
+            displayName: 'Execute Model Orchestrator'
